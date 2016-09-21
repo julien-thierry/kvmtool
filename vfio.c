@@ -224,6 +224,7 @@ static int vfio_pci_map_bar(struct kvm *kvm, int fd,
 {
 	void *base;
 	int ret, prot = 0;
+	u64 map_size = ALIGN(region->info.size, PAGE_SIZE);
 
 	/*
 	 * We don't want to mess about trapping BAR accesses, so require
@@ -253,10 +254,10 @@ static int vfio_pci_map_bar(struct kvm *kvm, int fd,
 	region->host_addr = base;
 
 	/* Grab some MMIO space in the guest */
-	region->guest_phys_addr = pci_get_io_space_block(region->info.size);
+	region->guest_phys_addr = pci_get_io_space_block(map_size);
 
 	/* Register the BAR as a memory region with KVM */
-	ret = kvm__register_mem(kvm, region->guest_phys_addr, region->info.size,
+	ret = kvm__register_mem(kvm, region->guest_phys_addr, map_size,
 				region->host_addr);
 	if (ret) {
 		pr_err("Failed to register BAR as memory region with KVM");
