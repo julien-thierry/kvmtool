@@ -174,9 +174,49 @@ void pci__config_wr(struct kvm *kvm, union pci_config_address addr, void *data, 
 	 * BAR there next time it reads from it. When the kernel got the size it
 	 * would write the address back.
 	 */
-	if (bar < 6 && ioport__read32(data) == 0xFFFFFFFF) {
-		u32 sz = pci_hdr->bar_size[bar];
-		memcpy(base + offset, &sz, sizeof(sz));
+	if (bar < 6) {
+		/*
+		 * According to the PCI local bus specification REV 3.0:
+		 * The number of upper bits that a device actually implements
+		 * depends on how much of the address space the device will
+		 * respond to. A device that wants a 1 MB memory address space
+		 * (using a 32-bit base address register) would build the top
+		 * 12 bits of the address register, hardwiring the other bits
+		 * to 0.
+		 * Furthermore software can determine how much address space the
+		 * device requires by writing a value of all 1's to the register
+		 * and then reading the value back. The device will return 0's in
+		 * all don't-care address bits, effectively specifying the address
+		 * space required.
+		 *
+		 * The following code emulates this by storing the value written
+		 * to the BAR, applying the size mask to clear the lower bits,
+		 * restoring the information bits and then updating the BAR value.
+		 */
+		u32 bar_value;
+		u32 info = pci_hdr->bar[bar] & 0xF;	/* Extract the info bits */
+
+
+		/* Store the value written by software */
+		memcpy(base + offset, data, size);
+
+		/* Apply the size mask to the bar value to clear the lower bits */
+		bar_value = pci_hdr->bar[bar] & ~(pci_hdr->bar_size[bar] - 1);
+
+		/* Warn if the bar size is not a power of 2 */
+		WARN_ON(!is_power_of_2(pci_hdr->bar_size[bar]));
+
+		/* Restore the info bits */
+		if ((info & 0x1) == 0x1) {
+			/* BAR for I/O */
+			bar_value = ((bar_value & ~0x3) | 0x1);
+		} else {
+			/* BAR for Memory */
+			bar_value = ((bar_value & ~0xF) | info);
+		}
+
+		/* Store the final BAR value */
+		pci_hdr->bar[bar] = bar_value;
 	} else {
 		memcpy(base + offset, data, size);
 	}
