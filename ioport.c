@@ -5,6 +5,7 @@
 #include "kvm/brlock.h"
 #include "kvm/rbtree-interval.h"
 #include "kvm/mutex.h"
+#include "kvm/ref_cnt.h"
 
 #include <linux/kvm.h>	/* for KVM_EXIT_* */
 #include <linux/types.h>
@@ -14,11 +15,25 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-#define ioport_node(n) rb_entry(n, struct ioport, node)
+#define ioport_node(n) rb_entry(n, struct ioport_data, node)
 
 static struct rb_root		ioport_tree = RB_ROOT;
 
-static struct ioport *ioport_search(struct rb_root *root, u64 addr)
+struct ioport_data {
+	struct rb_int_node	node;
+	struct ioport		ioport;
+	struct ref_cnt		ref_cnt;
+};
+
+static void ioport_release(struct ref_cnt  *ref_cnt)
+{
+	struct ioport_data *data = container_of(ref_cnt,
+						struct ioport_data, ref_cnt);
+
+	free(data);
+}
+
+static struct ioport_data *ioport_search(struct rb_root *root, u64 addr)
 {
 	struct rb_int_node *node;
 
@@ -29,12 +44,12 @@ static struct ioport *ioport_search(struct rb_root *root, u64 addr)
 	return ioport_node(node);
 }
 
-static int ioport_insert(struct rb_root *root, struct ioport *data)
+static int ioport_insert(struct rb_root *root, struct ioport_data *data)
 {
 	return rb_int_insert(root, &data->node);
 }
 
-static void ioport_remove(struct rb_root *root, struct ioport *data)
+static void ioport_remove(struct rb_root *root, struct ioport_data *data)
 {
 	rb_int_erase(root, &data->node);
 }
@@ -65,7 +80,7 @@ static void generate_ioport_fdt_node(void *fdt,
 
 int ioport__register(struct kvm *kvm, u16 port, struct ioport_operations *ops, int count, void *param)
 {
-	struct ioport *entry;
+	struct ioport_data *entry;
 	int r;
 
 	br_write_lock(kvm);
@@ -74,14 +89,16 @@ int ioport__register(struct kvm *kvm, u16 port, struct ioport_operations *ops, i
 	if (entry) {
 		pr_warning("ioport re-registered: %x", port);
 		rb_int_erase(&ioport_tree, &entry->node);
+		ref_put(&entry->ref_cnt, ioport_release);
 	}
 
 	entry = malloc(sizeof(*entry));
 	if (entry == NULL)
 		return -ENOMEM;
 
-	*entry = (struct ioport) {
-		.node		= RB_INT_INIT(port, port + count),
+	ref_cnt_init(&entry->ref_cnt);
+	entry->node = RB_INT_INIT(port, port + count);
+	entry->ioport = (struct ioport) {
 		.ops		= ops,
 		.priv		= param,
 		.dev_hdr	= (struct device_header) {
@@ -90,14 +107,15 @@ int ioport__register(struct kvm *kvm, u16 port, struct ioport_operations *ops, i
 		},
 	};
 
+	/* Give the ref to the tree */
 	r = ioport_insert(&ioport_tree, entry);
 	if (r < 0) {
-		free(entry);
+		ref_put(&entry->ref_cnt, ioport_release);
 		br_write_unlock(kvm);
 		return r;
 	}
 
-	device__register(&entry->dev_hdr);
+	device__register(&entry->ioport.dev_hdr);
 	br_write_unlock(kvm);
 
 	return port;
@@ -105,7 +123,7 @@ int ioport__register(struct kvm *kvm, u16 port, struct ioport_operations *ops, i
 
 int ioport__unregister(struct kvm *kvm, u16 port)
 {
-	struct ioport *entry;
+	struct ioport_data *entry;
 	int r;
 
 	br_write_lock(kvm);
@@ -115,10 +133,9 @@ int ioport__unregister(struct kvm *kvm, u16 port)
 	if (!entry)
 		goto done;
 
-	device__unregister(&entry->dev_hdr);
+	device__unregister(&entry->ioport.dev_hdr);
 	ioport_remove(&ioport_tree, entry);
-
-	free(entry);
+	ref_put(&entry->ref_cnt, ioport_release);
 
 	r = 0;
 
@@ -130,7 +147,7 @@ done:
 
 static void ioport__unregister_all(void)
 {
-	struct ioport *entry;
+	struct ioport_data *entry;
 	struct rb_node *rb;
 	struct rb_int_node *rb_node;
 
@@ -138,9 +155,9 @@ static void ioport__unregister_all(void)
 	while (rb) {
 		rb_node = rb_int(rb);
 		entry = ioport_node(rb_node);
-		device__unregister(&entry->dev_hdr);
+		device__unregister(&entry->ioport.dev_hdr);
 		ioport_remove(&ioport_tree, entry);
-		free(entry);
+		ref_put(&entry->ref_cnt, ioport_release);
 		rb = rb_first(&ioport_tree);
 	}
 }
@@ -162,29 +179,34 @@ bool kvm__emulate_io(struct kvm_cpu *vcpu, u16 port, void *data, int direction, 
 {
 	struct ioport_operations *ops;
 	bool ret = false;
-	struct ioport *entry;
+	struct ioport_data *entry;
 	void *ptr = data;
 	struct kvm *kvm = vcpu->kvm;
 
 	br_read_lock(kvm);
 	entry = ioport_search(&ioport_tree, port);
-	if (!entry)
+	if (!entry) {
+		br_read_unlock(kvm);
 		goto out;
+	}
 
-	ops	= entry->ops;
+	ref_get(&entry->ref_cnt);
+	br_read_unlock(kvm);
+
+	ops	= entry->ioport.ops;
 
 	while (count--) {
 		if (direction == KVM_EXIT_IO_IN && ops->io_in)
-				ret = ops->io_in(entry, vcpu, port, ptr, size);
+				ret = ops->io_in(&entry->ioport, vcpu, port, ptr, size);
 		else if (direction == KVM_EXIT_IO_OUT && ops->io_out)
-				ret = ops->io_out(entry, vcpu, port, ptr, size);
+				ret = ops->io_out(&entry->ioport, vcpu, port, ptr, size);
 
 		ptr += size;
 	}
 
-out:
-	br_read_unlock(kvm);
+	ref_put(&entry->ref_cnt, ioport_release);
 
+out:
 	if (ret)
 		return true;
 
