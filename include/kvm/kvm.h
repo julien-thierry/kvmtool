@@ -82,9 +82,7 @@ struct kvm {
 
 	int			vm_state;
 
-#ifdef KVM_BRLOCK_DEBUG
 	pthread_rwlock_t	brlock_sem;
-#endif
 };
 
 void kvm__set_dir(const char *fmt, ...);

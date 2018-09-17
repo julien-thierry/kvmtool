@@ -17,8 +17,6 @@
 #define barrier()		__asm__ __volatile__("": : :"memory")
 #endif
 
-#ifdef KVM_BRLOCK_DEBUG
-
 #include "kvm/rwsem.h"
 
 #define br_read_lock(kvm)	down_read(&(kvm)->brlock_sem);
@@ -26,14 +24,5 @@
 
 #define br_write_lock(kvm)	down_write(&(kvm)->brlock_sem);
 #define br_write_unlock(kvm)	up_write(&(kvm)->brlock_sem);
-
-#else
-
-#define br_read_lock(kvm)	do { (void) (kvm); barrier(); } while (0)
-#define br_read_unlock(kvm)	do { (void) (kvm); barrier(); } while (0)
-
-#define br_write_lock(kvm)	kvm__pause(kvm)
-#define br_write_unlock(kvm)	kvm__continue(kvm)
-#endif
 
 #endif
