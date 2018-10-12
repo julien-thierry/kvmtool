@@ -6,6 +6,7 @@
 #include "kvm/fdt.h"
 
 #include "arm-common/gic.h"
+#include "arm-common/pci.h"
 
 #include <linux/kernel.h>
 #include <linux/kvm.h>
@@ -86,6 +87,8 @@ void kvm__arch_init(struct kvm *kvm, const char *hugetlbfs_path, u64 ram_size)
 	/* Create the virtual GIC. */
 	if (gic__create(kvm, kvm->cfg.arch.irqchip))
 		die("Failed to create virtual GIC");
+
+	pci__arm_init(kvm);
 }
 
 #define FDT_ALIGN	SZ_2M

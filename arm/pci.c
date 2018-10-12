@@ -1,3 +1,5 @@
+#include "linux/sizes.h"
+
 #include "kvm/devices.h"
 #include "kvm/fdt.h"
 #include "kvm/kvm.h"
@@ -6,6 +8,11 @@
 #include "kvm/util.h"
 
 #include "arm-common/pci.h"
+
+#define ARM_PCI_IO_START ALIGN(PCI_IOPORT_START, SZ_4K)
+
+/* Must be a multiple of 4k */
+#define ARM_PCI_IO_SIZE ((ARM_MMIO_AREA - ARM_PCI_IO_START) & ~(SZ_4K - 1))
 
 /*
  * An entry in the interrupt-map table looks like:
@@ -24,6 +31,14 @@ struct of_interrupt_map_entry {
 	struct of_gic_irq		gic_irq;
 } __attribute__((packed));
 
+void pci__arm_init(struct kvm *kvm)
+{
+	u32 align_pad = ARM_PCI_IO_START - PCI_IOPORT_START;
+
+	/* Make PCI port allocation start at a properly aligned address */
+	pci_get_io_port_block(align_pad);
+}
+
 void pci__generate_fdt_nodes(void *fdt)
 {
 	struct device_header *dev_hdr;
@@ -40,10 +55,10 @@ void pci__generate_fdt_nodes(void *fdt)
 			.pci_addr = {
 				.hi	= cpu_to_fdt32(of_pci_b_ss(OF_PCI_SS_IO)),
 				.mid	= 0,
-				.lo	= 0,
+				.lo	= cpu_to_fdt32(ARM_PCI_IO_START),
 			},
-			.cpu_addr	= cpu_to_fdt64(KVM_IOPORT_AREA),
-			.length		= cpu_to_fdt64(ARM_IOPORT_SIZE),
+			.cpu_addr	= cpu_to_fdt64(ARM_PCI_IO_START),
+			.length		= cpu_to_fdt64(ARM_PCI_IO_SIZE),
 		},
 		{
 			.pci_addr = {
