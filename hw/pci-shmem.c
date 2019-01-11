@@ -357,7 +357,8 @@ int pci_shmem__init(struct kvm *kvm)
 		return 0;
 
 	/* Register MMIO space for MSI-X */
-	r = ioport__register(kvm, IOPORT_EMPTY, &shmem_pci__io_ops, IOPORT_SIZE, NULL);
+	r = pci_get_io_port_block(IOPORT_SIZE);
+	r = ioport__register(kvm, r, &shmem_pci__io_ops, IOPORT_SIZE, NULL);
 	if (r < 0)
 		return r;
 	ivshmem_registers = (u16)r;
