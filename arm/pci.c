@@ -37,6 +37,9 @@ void pci__arm_init(struct kvm *kvm)
 
 	/* Make PCI port allocation start at a properly aligned address */
 	pci_get_io_port_block(align_pad);
+
+	/* Convention, don't allocate first 0x1000 bytes of PCI IO */
+	pci_get_io_port_block(0x1000);
 }
 
 void pci__generate_fdt_nodes(void *fdt)
