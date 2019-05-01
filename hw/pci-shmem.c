@@ -362,7 +362,7 @@ int pci_shmem__init(struct kvm *kvm)
 		return r;
 	ivshmem_registers = (u16)r;
 
-	msix_block = pci_get_io_space_block(0x1010);
+	msix_block = pci_get_mmio_block(0x1010);
 	kvm__register_mmio(kvm, msix_block, 0x1010, false, callback_mmio_msix, NULL);
 
 	/*

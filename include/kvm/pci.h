@@ -152,7 +152,7 @@ struct pci_device_header {
 int pci__init(struct kvm *kvm);
 int pci__exit(struct kvm *kvm);
 struct pci_device_header *pci__find_dev(u8 dev_num);
-u32 pci_get_io_space_block(u32 size);
+u32 pci_get_mmio_block(u32 size);
 void pci__assign_irq(struct device_header *dev_hdr);
 void pci__config_wr(struct kvm *kvm, union pci_config_address addr, void *data, int size);
 void pci__config_rd(struct kvm *kvm, union pci_config_address addr, void *data, int size);

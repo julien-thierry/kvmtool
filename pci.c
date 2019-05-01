@@ -16,15 +16,15 @@ static u32 pci_config_address_bits;
  * (That's why it can still 32bit even with 64bit guests-- 64bit
  * PCI isn't currently supported.)
  */
-static u32 io_space_blocks		= KVM_PCI_MMIO_AREA;
+static u32 mmio_space_blocks		= KVM_PCI_MMIO_AREA;
 
 /*
  * BARs must be naturally aligned, so enforce this in the allocator.
  */
-u32 pci_get_io_space_block(u32 size)
+u32 pci_get_mmio_block(u32 size)
 {
-	u32 block = ALIGN(io_space_blocks, size);
-	io_space_blocks = block + size;
+	u32 block = ALIGN(mmio_space_blocks, size);
+	mmio_space_blocks = block + size;
 	return block;
 }
 
