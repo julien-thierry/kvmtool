@@ -255,6 +255,7 @@ dev_base_init(pci__init);
 
 int pci__exit(struct kvm *kvm)
 {
+	kvm__deregister_mmio(kvm, KVM_PCI_CFG_AREA);
 	ioport__unregister(kvm, PCI_CONFIG_DATA);
 	ioport__unregister(kvm, PCI_CONFIG_ADDRESS);
 
