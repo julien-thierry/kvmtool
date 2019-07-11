@@ -1,12 +1,13 @@
-#include "kvm/devices.h"
-#include "kvm/pci.h"
-#include "kvm/ioport.h"
-#include "kvm/irq.h"
-#include "kvm/util.h"
-#include "kvm/kvm.h"
+#include <assert.h>
 
 #include <linux/err.h>
-#include <assert.h>
+
+#include "kvm/devices.h"
+#include "kvm/ioport.h"
+#include "kvm/irq.h"
+#include "kvm/kvm.h"
+#include "kvm/pci.h"
+#include "kvm/util.h"
 
 static u32 pci_config_address_bits;
 
