@@ -326,7 +326,7 @@ int kvm_cpu__exit(struct kvm *kvm)
 	kvm__continue(kvm);
 
 	free(kvm->cpus);
-
+	kvm->cpus = NULL;
 	kvm->nrcpus = 0;
 
 	close(task_eventfd);
