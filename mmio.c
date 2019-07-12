@@ -2,7 +2,6 @@
 #include "kvm/kvm-cpu.h"
 #include "kvm/rbtree-interval.h"
 #include "kvm/brlock.h"
-#include "kvm/ref_cnt.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,17 +19,9 @@ struct mmio_mapping {
 	struct rb_int_node	node;
 	void			(*mmio_fn)(struct kvm_cpu *vcpu, u64 addr, u8 *data, u32 len, u8 is_write, void *ptr);
 	void			*ptr;
-	struct ref_cnt		ref_cnt;
 };
 
 static struct rb_root mmio_tree = RB_ROOT;
-
-static void mmio_release(struct ref_cnt *ref_cnt)
-{
-	struct mmio_mapping * mmio = container_of(ref_cnt, struct mmio_mapping, ref_cnt);
-
-	free(mmio);
-}
 
 static struct mmio_mapping *mmio_search(struct rb_root *root, u64 addr, u64 len)
 {
@@ -84,7 +75,6 @@ int kvm__register_mmio(struct kvm *kvm, u64 phys_addr, u64 phys_addr_len, bool c
 		.node = RB_INT_INIT(phys_addr, phys_addr + phys_addr_len),
 		.mmio_fn = mmio_fn,
 		.ptr	= ptr,
-		.ref_cnt = REF_CNT_INIT,
 	};
 
 	if (coalesce) {
@@ -99,7 +89,6 @@ int kvm__register_mmio(struct kvm *kvm, u64 phys_addr, u64 phys_addr_len, bool c
 		}
 	}
 	br_write_lock(kvm);
-	/* Pass ref to tree, no need to put ref */
 	ret = mmio_insert(&mmio_tree, mmio);
 	br_write_unlock(kvm);
 
@@ -117,7 +106,6 @@ bool kvm__deregister_mmio(struct kvm *kvm, u64 phys_addr)
 		br_write_unlock(kvm);
 		return false;
 	}
-	/* Taking the ref from the tree */
 
 	zone = (struct kvm_coalesced_mmio_zone) {
 		.addr	= phys_addr,
@@ -126,10 +114,9 @@ bool kvm__deregister_mmio(struct kvm *kvm, u64 phys_addr)
 	ioctl(kvm->vm_fd, KVM_UNREGISTER_COALESCED_MMIO, &zone);
 
 	rb_int_erase(&mmio_tree, &mmio->node);
-	ref_put(&mmio->ref_cnt, mmio_release);
-
 	br_write_unlock(kvm);
 
+	free(mmio);
 	return true;
 }
 
@@ -140,20 +127,15 @@ bool kvm__emulate_mmio(struct kvm_cpu *vcpu, u64 phys_addr, u8 *data, u32 len, u
 	br_read_lock(vcpu->kvm);
 	mmio = mmio_search(&mmio_tree, phys_addr, len);
 
-	if (!mmio) {
-		br_read_unlock(vcpu->kvm);
+	if (mmio)
+		mmio->mmio_fn(vcpu, phys_addr, data, len, is_write, mmio->ptr);
+	else {
 		if (vcpu->kvm->cfg.mmio_debug)
 			fprintf(stderr,	"Warning: Ignoring MMIO %s at %016llx (length %u)\n",
 				to_direction(is_write),
 				(unsigned long long)phys_addr, len);
-		return true;
 	}
-
-	ref_get(&mmio->ref_cnt);
 	br_read_unlock(vcpu->kvm);
-
-	mmio->mmio_fn(vcpu, phys_addr, data, len, is_write, mmio->ptr);
-	ref_put(&mmio->ref_cnt, mmio_release);
 
 	return true;
 }
