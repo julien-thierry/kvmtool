@@ -18,6 +18,7 @@
 struct kvm;
 
 struct ioport {
+	struct rb_int_node		node;
 	struct ioport_operations	*ops;
 	void				*priv;
 	struct device_header		dev_hdr;
