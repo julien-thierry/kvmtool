@@ -29,8 +29,8 @@
 
 #else
 
-#define br_read_lock(kvm)	barrier()
-#define br_read_unlock(kvm)	barrier()
+#define br_read_lock(kvm)	do { (void) (kvm); barrier(); } while (0)
+#define br_read_unlock(kvm)	do { (void) (kvm); barrier(); } while (0)
 
 #define br_write_lock(kvm)	kvm__pause(kvm)
 #define br_write_unlock(kvm)	kvm__continue(kvm)
