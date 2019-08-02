@@ -475,6 +475,7 @@ int virtio_pci__init(struct kvm *kvm, void *dev, struct virtio_device *vdev,
 		.bar_size[0]		= cpu_to_le32(PCI_IO_SIZE),
 		.bar_size[1]		= cpu_to_le32(PCI_IO_SIZE),
 		.bar_size[2]		= cpu_to_le32(PCI_IO_SIZE*2),
+		.device_lock		= PTHREAD_RWLOCK_INITIALIZER,
 	};
 
 	vpci->dev_hdr = (struct device_header) {

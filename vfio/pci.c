@@ -712,6 +712,8 @@ static int vfio_pci_fixup_cfg_space(struct vfio_device *vdev)
 
 	pdev->hdr.irq_type = IRQ_TYPE_LEVEL_HIGH;
 
+	pdev->hdr.device_lock = (pthread_rwlock_t)PTHREAD_RWLOCK_INITIALIZER;
+
 	return 0;
 }
 

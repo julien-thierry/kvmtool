@@ -29,6 +29,7 @@ static struct pci_device_header pci_shmem_pci_device = {
 	.msix.ctrl	= cpu_to_le16(1),
 	.msix.table_offset = cpu_to_le32(1),		/* Use BAR 1 */
 	.msix.pba_offset = cpu_to_le32(0x1001),		/* Use BAR 1 */
+	.device_lock	= PTHREAD_RWLOCK_INITIALIZER,
 };
 
 static struct device_header pci_shmem_device = {

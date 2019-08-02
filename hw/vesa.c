@@ -43,6 +43,7 @@ static struct pci_device_header vesa_pci_device = {
 	.subsys_id		= cpu_to_le16(PCI_SUBSYSTEM_ID_VESA),
 	.bar[1]			= cpu_to_le32(VESA_MEM_ADDR | PCI_BASE_ADDRESS_SPACE_MEMORY),
 	.bar_size[1]		= VESA_MEM_SIZE,
+	.device_lock		= PTHREAD_RWLOCK_INITIALIZER,
 };
 
 static struct device_header vesa_device = {

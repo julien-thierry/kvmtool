@@ -9,6 +9,7 @@
 #include "kvm/devices.h"
 #include "kvm/msi.h"
 #include "kvm/fdt.h"
+#include "kvm/rwsem.h"
 
 /*
  * PCI Configuration Mechanism #1 I/O ports. See Section 3.7.4.1.
@@ -94,6 +95,10 @@ struct pci_cap_hdr {
 
 struct pci_device_header;
 
+/*
+ * Operations are called with pci_hdr->device_lock taken with corresponding
+ * r/w access.
+ */
 struct pci_config_operations {
 	void (*write)(struct kvm *kvm, struct pci_device_header *pci_hdr,
 		      u8 offset, void *data, int sz);
@@ -141,6 +146,9 @@ struct pci_device_header {
 	 * edge-triggered INTx# for convenience.
 	 */
 	enum irq_type	irq_type;
+
+	/* Used to serialize use of the device against modification of its config space */
+	pthread_rwlock_t device_lock;
 };
 
 #define PCI_CAP(pci_hdr, pos) ((void *)(pci_hdr) + (pos))

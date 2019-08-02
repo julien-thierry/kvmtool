@@ -165,6 +165,8 @@ void pci__config_wr(struct kvm *kvm, union pci_config_address addr, void *data, 
 	offset = addr.w & PCI_DEV_CFG_MASK;
 	base = pci_hdr = device__find_dev(DEVICE_BUS_PCI, dev_num)->data;
 
+	down_write(&pci_hdr->device_lock);
+
 	if (pci_hdr->cfg_ops.write)
 		pci_hdr->cfg_ops.write(kvm, pci_hdr, offset, data, size);
 
@@ -173,7 +175,7 @@ void pci__config_wr(struct kvm *kvm, union pci_config_address addr, void *data, 
 	 * Not very nice but has been working so far.
 	 */
 	if (*(u32 *)(base + offset) == 0)
-		return;
+		goto unlock_device;
 
 	bar = (offset - PCI_BAR_OFFSET(0)) / sizeof(u32);
 
@@ -228,6 +230,9 @@ void pci__config_wr(struct kvm *kvm, union pci_config_address addr, void *data, 
 	} else {
 		memcpy(base + offset, data, size);
 	}
+
+unlock_device:
+	up_write(&pci_hdr->device_lock);
 }
 
 void pci__config_rd(struct kvm *kvm, union pci_config_address addr, void *data, int size)
@@ -240,10 +245,12 @@ void pci__config_rd(struct kvm *kvm, union pci_config_address addr, void *data, 
 		pci_hdr = device__find_dev(DEVICE_BUS_PCI, dev_num)->data;
 		offset = addr.w & PCI_DEV_CFG_MASK;
 
+		down_read(&pci_hdr->device_lock);
 		if (pci_hdr->cfg_ops.read)
 			pci_hdr->cfg_ops.read(kvm, pci_hdr, offset, data, size);
 
 		memcpy(data, (void *)pci_hdr + offset, size);
+		up_read(&pci_hdr->device_lock);
 	} else {
 		memset(data, 0xff, size);
 	}
