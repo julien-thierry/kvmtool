@@ -15,6 +15,7 @@
 #define KVM_PCI_MMIO_AREA	(KVM_MMIO_START + 0x1000000)
 #define KVM_VIRTIO_MMIO_AREA	(KVM_MMIO_START + 0x2000000)
 #define KVM_MMIO_SIZE		0x10000000
+#define KVM_PCI_MMIO_SIZE	(KVM_VIRTIO_MMIO_AREA - KVM_PCI_MMIO_AREA)
 
 /*
  * Just for reference. This and the above corresponds to what's used
