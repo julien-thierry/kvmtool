@@ -2,6 +2,7 @@
 
 #include <linux/err.h>
 
+#include "kvm/brlock.h"
 #include "kvm/devices.h"
 #include "kvm/ioport.h"
 #include "kvm/irq.h"
@@ -18,6 +19,197 @@ static u32 pci_config_address_bits;
  */
 static u32 mmio_space_blocks		= KVM_PCI_MMIO_AREA;
 static u16 io_port_blocks		= PCI_IOPORT_START;
+
+struct pci_bar_desc {
+	struct list_head l;
+	struct pci_device_header *hdr;
+	uint32_t bar_idx;
+	bool (*pci_bar_cb)(struct kvm_cpu *vcpu, u64 addr, u8 *data, u32 len,
+			   bool is_write, void *priv);
+	void *priv;
+};
+
+static LIST_HEAD(io_bars);
+static LIST_HEAD(mmio_bars);
+
+/* If a bar matches, returns the entry with the lock taken on the corresponding pci device */
+static struct pci_bar_desc *pci_find_bar(struct list_head *bar_list, u64 addr,
+					 bool (*match)(u64 addr,
+						       const struct pci_bar_desc *bar_desc))
+{
+	struct pci_bar_desc *cur;
+
+	list_for_each_entry(cur, bar_list, l) {
+		down_read(&cur->hdr->device_lock);
+		if (match(addr, cur)) {
+			/*
+			 * Return with the lock on device taken.
+			 * Nasty but I don't have a better idea.
+			 */
+			return cur;
+		}
+		up_read(&cur->hdr->device_lock);
+	}
+
+	return NULL;
+}
+
+static bool match_in_io_bar(u64 addr, const struct pci_bar_desc *desc)
+{
+	const struct pci_device_header *hdr = desc->hdr;
+	uint32_t bar_idx = desc->bar_idx;
+	u64 bar_addr = hdr->bar[bar_idx] & PCI_BASE_ADDRESS_IO_MASK;
+
+	if (!(hdr->command & PCI_COMMAND_IO))
+		return false;
+
+	return bar_addr <= addr &&
+	       (addr < bar_addr + hdr->bar_size[bar_idx]);
+}
+
+static inline bool pci_io_access(struct ioport *ioport, struct kvm_cpu *vcpu,
+				 u16 port, void *data, int size, bool is_write)
+{
+	struct pci_bar_desc *desc;
+	struct kvm *kvm = vcpu->kvm;
+	bool res = false;
+
+	br_read_lock(kvm);
+	desc = pci_find_bar(&io_bars, (u64)port, match_in_io_bar);
+	if (!desc)
+		goto vm_unlock;
+
+	res = desc->pci_bar_cb(vcpu, (u64)port, data, size, is_write,
+			       desc->priv);
+	up_read(&desc->hdr->device_lock);
+
+vm_unlock:
+	br_read_unlock(kvm);
+	return res;
+}
+
+static bool pci_io_write(struct ioport *ioport, struct kvm_cpu *vcpu,
+			 u16 port, void *data, int size)
+{
+	return pci_io_access(ioport, vcpu, port, data, size, true);
+}
+
+static bool pci_io_read(struct ioport *ioport, struct kvm_cpu *vcpu,
+			u16 port, void *data, int size)
+{
+	return pci_io_access(ioport, vcpu, port, data, size, false);
+}
+
+static struct ioport_operations pci_io_ops = {
+	.io_in	= pci_io_read,
+	.io_out	= pci_io_write,
+};
+
+static bool match_in_mmio_bar(u64 addr, const struct pci_bar_desc *desc)
+{
+	const struct pci_device_header *hdr = desc->hdr;
+	uint32_t bar_idx = desc->bar_idx;
+	u64 bar_addr = hdr->bar[bar_idx] & PCI_BASE_ADDRESS_MEM_MASK;
+
+	if (!(hdr->command & PCI_COMMAND_MEMORY))
+		return false;
+
+	return bar_addr <= addr &&
+	       (addr < bar_addr + hdr->bar_size[bar_idx]);
+}
+
+static void pci_mmio_callback(struct kvm_cpu *vcpu, u64 addr, u8 *data, u32 len,
+			      u8 is_write, void *ptr)
+{
+	struct pci_bar_desc *desc;
+	struct kvm *kvm = vcpu->kvm;
+
+	br_read_lock(kvm);
+
+	desc = pci_find_bar(&mmio_bars, addr, match_in_mmio_bar);
+	if (!desc)
+		goto vm_unlock;
+
+	if (!desc->pci_bar_cb(vcpu, addr, data, len, is_write, desc->priv))
+		pr_warning("Failed PCI MMIO access at 0x%llx, is_write: %u\n",
+			   addr, (unsigned) is_write);
+	up_read(&desc->hdr->device_lock);
+
+vm_unlock:
+	br_read_unlock(kvm);
+}
+
+int pci_register_bar(struct kvm *kvm, struct pci_device_header *hdr,
+		     uint32_t bar_idx,
+		     bool (*pci_bar_cb)(struct kvm_cpu *vcpu, u64 addr,
+				        u8 *data, u32 len,
+				        bool is_write, void *priv),
+		     void *priv)
+{
+	struct pci_bar_desc *bar_desc;
+	struct list_head *target;
+
+	if (bar_idx >= 6 || !hdr->bar_size[bar_idx])
+		return -EINVAL;
+
+	down_read(&hdr->device_lock);
+	if (hdr->bar[bar_idx] & PCI_BASE_ADDRESS_SPACE_IO)
+		target = &io_bars;
+	else
+		target = &mmio_bars;
+	up_read(&hdr->device_lock);
+
+	bar_desc = malloc(sizeof(*bar_desc));
+	if (!bar_desc)
+		return -ENOMEM;
+
+	bar_desc->hdr = hdr;
+	bar_desc->bar_idx = bar_idx;
+	bar_desc->pci_bar_cb = pci_bar_cb;
+	bar_desc->priv = priv;
+
+	br_write_lock(kvm);
+	/* Todo: Check for duplicates? */
+	list_add(&bar_desc->l, target);
+	br_write_unlock(kvm);
+
+	return 0;
+}
+
+void pci_unregister_bar(struct kvm *kvm, struct pci_device_header *hdr,
+			uint32_t bar_idx)
+{
+	struct pci_bar_desc *found = NULL;
+	struct pci_bar_desc *cur;
+	struct list_head *target;
+
+	if (!hdr->bar_size[bar_idx])
+		return;
+
+	down_read(&hdr->device_lock);
+	if (hdr->bar[bar_idx] & PCI_BASE_ADDRESS_SPACE_IO)
+		target = &io_bars;
+	else
+		target = &mmio_bars;
+	up_read(&hdr->device_lock);
+
+	br_write_lock(kvm);
+	list_for_each_entry(cur, target, l) {
+		if (cur->hdr == hdr && cur->bar_idx == bar_idx) {
+			found = cur;
+			/*
+			 * We don't check for duplicates, you'll have to delete
+			 * a bar as many times as it was added to get rid of it
+			 */
+			break;
+		}
+	}
+
+	list_del(&found->l);
+	br_write_unlock(kvm);
+
+	free(found);
+}
 
 u16 pci_get_io_port_block(u32 size)
 {
@@ -281,7 +473,7 @@ struct pci_device_header *pci__find_dev(u8 dev_num)
 	return hdr->data;
 }
 
-int pci__init(struct kvm *kvm)
+static int pci__init_config(struct kvm *kvm)
 {
 	int r;
 
@@ -306,13 +498,60 @@ err_unregister_data:
 	ioport__unregister(kvm, PCI_CONFIG_DATA);
 	return r;
 }
-dev_base_init(pci__init);
 
-int pci__exit(struct kvm *kvm)
+static int pci__init_address_space(struct kvm *kvm)
+{
+	int r;
+
+	r = ioport__register(kvm, PCI_IOPORT_START, &pci_io_ops,
+			     PCI_IO_SPACE_SIZE, NULL);
+	if (r < 0)
+		return r;
+
+	r = kvm__register_mmio(kvm, KVM_PCI_MMIO_AREA, KVM_PCI_MMIO_SIZE,
+			       false, pci_mmio_callback, NULL);
+	if (r < 0)
+		goto err_unregister_io;
+
+	return 0;
+
+err_unregister_io:
+	ioport__unregister(kvm, PCI_IOPORT_START);
+	return r;
+
+}
+
+static void pci__cleanup_config(struct kvm *kvm)
 {
 	kvm__deregister_mmio(kvm, KVM_PCI_CFG_AREA);
 	ioport__unregister(kvm, PCI_CONFIG_DATA);
 	ioport__unregister(kvm, PCI_CONFIG_ADDRESS);
+}
+
+int pci__init(struct kvm *kvm)
+{
+	int r;
+
+	r = pci__init_config(kvm);
+	if (r < 0)
+		return r;
+
+	r = pci__init_address_space(kvm);
+	if (r < 0)
+		goto err_cleanup_config;
+
+	return 0;
+
+err_cleanup_config:
+	pci__cleanup_config(kvm);
+	return r;
+}
+dev_base_init(pci__init);
+
+
+int pci__exit(struct kvm *kvm)
+{
+	pci__cleanup_config(kvm);
 
 	return 0;
 }

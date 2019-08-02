@@ -1,3 +1,4 @@
+#include "kvm/ioport.h"
 #include "kvm/irq.h"
 #include "kvm/kvm.h"
 #include "kvm/kvm-cpu.h"
@@ -464,6 +465,20 @@ static void vfio_pci_cfg_read(struct kvm *kvm, struct pci_device_header *pci_hdr
 			      sz, offset);
 }
 
+static void vfio_pci_cfg_update_bar(struct kvm *kvm, struct vfio_device *vdev, int bar)
+{
+	struct pci_device_header *hdr = &vdev->pci.hdr;
+	struct vfio_region *bar_region;
+
+	bar_region = &vdev->regions[bar + VFIO_PCI_BAR0_REGION_INDEX];
+
+	if (bar_region->is_ioport) {
+		bar_region->port_base = hdr->bar[bar] & PCI_BASE_ADDRESS_IO_MASK;
+	} else {
+		bar_region->guest_phys_addr = hdr->bar[bar] & PCI_BASE_ADDRESS_MEM_MASK;
+	}
+}
+
 static void vfio_pci_cfg_write(struct kvm *kvm, struct pci_device_header *pci_hdr,
 			       u8 offset, void *data, int sz)
 {
@@ -490,6 +505,9 @@ static void vfio_pci_cfg_write(struct kvm *kvm, struct pci_device_header *pci_hd
 	if (pread(vdev->fd, base + offset, sz, info->offset + offset) != sz)
 		vfio_dev_warn(vdev, "Failed to read %d bytes from Configuration Space at 0x%x",
 			      sz, offset);
+
+	if (offset >= PCI_BASE_ADDRESS_0 && offset <= PCI_BASE_ADDRESS_5)
+		vfio_pci_cfg_update_bar(kvm, vdev, offset - PCI_BASE_ADDRESS_0);
 }
 
 static ssize_t vfio_pci_msi_cap_size(struct msi_cap_64 *cap_hdr)
@@ -849,6 +867,8 @@ static int vfio_pci_configure_bar(struct kvm *kvm, struct vfio_device *vdev,
 		/* Grab some MMIO space in the guest */
 		map_size = ALIGN(region->info.size, PAGE_SIZE);
 		region->guest_phys_addr = pci_get_mmio_block(map_size);
+	} else {
+		region->port_base = pci_get_io_port_block(region->info.size);
 	}
 
 	/* Map the BARs into the guest or setup a trap region. */

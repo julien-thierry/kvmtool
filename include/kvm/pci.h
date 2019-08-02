@@ -1,6 +1,8 @@
 #ifndef KVM__PCI_H
 #define KVM__PCI_H
 
+#include <stdbool.h>
+
 #include <linux/types.h>
 #include <linux/kvm.h>
 #include <linux/pci_regs.h>
@@ -21,9 +23,11 @@
 #define PCI_CONFIG_BUS_FORWARD	0xcfa
 #define PCI_IO_SIZE		0x100
 #define PCI_IOPORT_START	0x6200
+#define PCI_IO_SPACE_SIZE	(0x10000 - PCI_IOPORT_START)
 #define PCI_CFG_SIZE		(1ULL << 24)
 
 struct kvm;
+struct kvm_cpu;
 
 union pci_config_address {
 	struct {
@@ -168,5 +172,15 @@ void pci__config_wr(struct kvm *kvm, union pci_config_address addr, void *data, 
 void pci__config_rd(struct kvm *kvm, union pci_config_address addr, void *data, int size);
 
 void *pci_find_cap(struct pci_device_header *hdr, u8 cap_type);
+
+/* pci_bar_cb will get called with hdr->device_lock taken for read */
+int pci_register_bar(struct kvm *kvm, struct pci_device_header *hdr,
+		     uint32_t bar_idx,
+		     bool (*pci_bar_cb)(struct kvm_cpu *vcpu, u64 addr,
+				        u8 *data, u32 len,
+				        bool is_write, void *priv),
+		     void *priv);
+void pci_unregister_bar(struct kvm *kvm, struct pci_device_header *hdr,
+			uint32_t bar_idx);
 
 #endif /* KVM__PCI_H */

@@ -81,23 +81,22 @@ out_free_buf:
 	return ret;
 }
 
-static bool vfio_ioport_in(struct ioport *ioport, struct kvm_cpu *vcpu,
-			   u16 port, void *data, int len)
+static bool vfio_ioport_in(struct vfio_region *region, u64 addr,
+			   void *data, int len)
 {
 	u32 val;
 	ssize_t nr;
-	struct vfio_region *region = ioport->priv;
 	struct vfio_device *vdev = region->vdev;
 
-	u32 offset = port - region->port_base;
+	u32 offset = addr - region->port_base;
 
 	if (!(region->info.flags & VFIO_REGION_INFO_FLAG_READ))
 		return false;
 
 	nr = pread(vdev->fd, &val, len, region->info.offset + offset);
 	if (nr != len) {
-		vfio_dev_err(vdev, "could not read %d bytes from I/O port 0x%x\n",
-			     len, port);
+		vfio_dev_err(vdev, "could not read %d bytes from I/O port 0x%llx\n",
+			     len, addr);
 		return false;
 	}
 
@@ -118,15 +117,14 @@ static bool vfio_ioport_in(struct ioport *ioport, struct kvm_cpu *vcpu,
 	return true;
 }
 
-static bool vfio_ioport_out(struct ioport *ioport, struct kvm_cpu *vcpu,
-			    u16 port, void *data, int len)
+static bool vfio_ioport_out(struct vfio_region *region, u64 addr,
+			    void *data, int len)
 {
 	u32 val;
 	ssize_t nr;
-	struct vfio_region *region = ioport->priv;
 	struct vfio_device *vdev = region->vdev;
 
-	u32 offset = port - region->port_base;
+	u32 offset = addr - region->port_base;
 
 	if (!(region->info.flags & VFIO_REGION_INFO_FLAG_WRITE))
 		return false;
@@ -147,19 +145,25 @@ static bool vfio_ioport_out(struct ioport *ioport, struct kvm_cpu *vcpu,
 
 	nr = pwrite(vdev->fd, &val, len, region->info.offset + offset);
 	if (nr != len)
-		vfio_dev_err(vdev, "could not write %d bytes to I/O port 0x%x",
-			     len, port);
+		vfio_dev_err(vdev, "could not write %d bytes to I/O port 0x%llx",
+			     len, addr);
 
 	return nr == len;
 }
 
-static struct ioport_operations vfio_ioport_ops = {
-	.io_in	= vfio_ioport_in,
-	.io_out	= vfio_ioport_out,
-};
+static bool vfio_io_access(struct kvm_cpu *vcpu, u64 addr, u8 *data, u32 len,
+			   bool is_write, void *priv)
+{
+	struct vfio_region *region = priv;
 
-static void vfio_mmio_access(struct kvm_cpu *vcpu, u64 addr, u8 *data, u32 len,
-			     u8 is_write, void *ptr)
+	if (is_write)
+		return vfio_ioport_out(region, addr, data, len);
+	else
+		return vfio_ioport_in(region, addr, data, len);
+}
+
+static bool vfio_mmio_access(struct kvm_cpu *vcpu, u64 addr, u8 *data, u32 len,
+			     bool is_write, void *ptr)
 {
 	u64 val;
 	ssize_t nr;
@@ -170,6 +174,9 @@ static void vfio_mmio_access(struct kvm_cpu *vcpu, u64 addr, u8 *data, u32 len,
 
 	if (len < 1 || len > 8)
 		goto err_report;
+
+	if (region->host_addr)
+		pr_warning("Callback called for user mapped vfio region\n");
 
 	if (is_write) {
 		if (!(region->info.flags & VFIO_REGION_INFO_FLAG_WRITE))
@@ -191,31 +198,31 @@ static void vfio_mmio_access(struct kvm_cpu *vcpu, u64 addr, u8 *data, u32 len,
 		memcpy(data, &val, len);
 	}
 
-	return;
+	return true;
 
 err_report:
 	vfio_dev_err(vdev, "could not %s %u bytes at 0x%x (0x%llx)", is_write ?
 		     "write" : "read", len, offset, addr);
+
+	return false;
 }
 
 static int vfio_setup_trap_region(struct kvm *kvm, struct vfio_device *vdev,
 				  struct vfio_region *region)
 {
-	if (region->is_ioport) {
-		int port = pci_get_io_port_block(region->info.size);
+	uint32_t bar_idx;
 
-		port = ioport__register(kvm, port, &vfio_ioport_ops,
-					region->info.size, region);
-		if (port < 0)
-			return port;
+	if (region->info.index < VFIO_PCI_BAR0_REGION_INDEX)
+		return -EINVAL;
 
-		region->port_base = port;
-		return 0;
-	}
+	bar_idx = region->info.index - VFIO_PCI_BAR0_REGION_INDEX;
 
-	return kvm__register_mmio(kvm, region->guest_phys_addr,
-				  region->info.size, false, vfio_mmio_access,
-				  region);
+	if (region->is_ioport)
+		return pci_register_bar(kvm, &vdev->pci.hdr, bar_idx,
+					vfio_io_access, region);
+	else
+		return pci_register_bar(kvm, &vdev->pci.hdr, bar_idx,
+					vfio_mmio_access, region);
 }
 
 int vfio_map_region(struct kvm *kvm, struct vfio_device *vdev,
@@ -225,13 +232,16 @@ int vfio_map_region(struct kvm *kvm, struct vfio_device *vdev,
 	int ret, prot = 0;
 	/* KVM needs page-aligned regions */
 	u64 map_size = ALIGN(region->info.size, PAGE_SIZE);
+	u32 region_flags;
 
-	if (!(region->info.flags & VFIO_REGION_INFO_FLAG_MMAP))
+	region_flags = region->info.flags;
+
+	if (!(region_flags & VFIO_REGION_INFO_FLAG_MMAP))
 		return vfio_setup_trap_region(kvm, vdev, region);
 
-	if (region->info.flags & VFIO_REGION_INFO_FLAG_READ)
+	if (region_flags & VFIO_REGION_INFO_FLAG_READ)
 		prot |= PROT_READ;
-	if (region->info.flags & VFIO_REGION_INFO_FLAG_WRITE)
+	if (region_flags & VFIO_REGION_INFO_FLAG_WRITE)
 		prot |= PROT_WRITE;
 
 	base = mmap(NULL, region->info.size, prot, MAP_SHARED, vdev->fd,
